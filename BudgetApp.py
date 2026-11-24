@@ -1,5 +1,3 @@
-#https://script.google.com/macros/s/AKfycbzqAlf_KVXwjGiWycnTe_8tvhf4BfAO2DhSGb_174Y3tk9M50Dnjxt40mtF2uDlOKJBHw/exec
-#https://script.google.com/macros/s/AKfycbxQYxuPsgaUu6a8ptoRxsc7TPoKY52MxaKqoQnZJVhDL086WbB7SR1AwEmLR3tzNOpQUg/exec
 from datetime import datetime
 import re
 import pandas as pd
@@ -7,7 +5,7 @@ import requests
 import streamlit as st
 
 # --- НАСТРОЙКИ ---
-SCRIPT_URL = "https://script.google.com/macros/s/AKfycbxQYxuPsgaUu6a8ptoRxsc7TPoKY52MxaKqoQnZJVhDL086WbB7SR1AwEmLR3tzNOpQUg/exec"
+SCRIPT_URL = st.secrets.get("SCRIPT_URL", "")
 
 DATA_WORKSHEET = "БД"
 DICT_WORKSHEET = "Спр_Категории"

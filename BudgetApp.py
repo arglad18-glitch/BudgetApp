@@ -16,6 +16,20 @@ SHARED_LABEL = "Неопр... (на всех)"
 FORM_USERS = FAMILY_MEMBERS + [SHARED_LABEL]
 
 st.set_page_config(page_title="Семейный бюджет", page_icon="👨‍👩‍👧‍👦", layout="wide")
+# --- ЗАЩИТА ПАРОЛЕМ ---
+if "authenticated" not in st.session_state:
+    st.session_state["authenticated"] = False
+
+if not st.session_state["authenticated"]:
+    st.title("🔒 Вход в семейный бюджет")
+    pwd = st.text_input("Введите пароль доступа:", type="password")
+    if st.button("Войти", type="primary"):
+        if pwd == st.secrets.get("APP_PASSWORD", ""):
+            st.session_state["authenticated"] = True
+            st.rerun()
+        else:
+            st.error("Неверный пароль!")
+    st.stop()  # Останавливает загрузку всего остального кода до ввода пароля
 
 
 def get_item(seq, idx, default=""):

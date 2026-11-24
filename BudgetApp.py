@@ -4,32 +4,33 @@ import pandas as pd
 import requests
 import streamlit as st
 
-# --- НАСТРОЙКИ ---
+st.set_page_config(page_title="Семейный бюджет", page_icon="👨‍👩‍👧‍👦", layout="wide")
+
+# --- НАСТРОЙКИ ИЗ SECRETS ---
 SCRIPT_URL = st.secrets.get("SCRIPT_URL", "")
+APP_PASSWORD = st.secrets.get("APP_PASSWORD", "")
+
+# --- ЗАЩИТА ПАРОЛЕМ (срабатывает, если APP_PASSWORD задан в Secrets) ---
+if APP_PASSWORD:
+    if "authenticated" not in st.session_state:
+        st.session_state["authenticated"] = False
+    if not st.session_state["authenticated"]:
+        st.title("🔒 Вход в семейный бюджет")
+        pwd = st.text_input("Введите пароль доступа:", type="password")
+        if st.button("Войти", type="primary"):
+            if pwd == APP_PASSWORD:
+                st.session_state["authenticated"] = True
+                st.rerun()
+            else:
+                st.error("Неверный пароль!")
+        st.stop()
 
 DATA_WORKSHEET = "БД"
-DICT_WORKSHEET = "Спр_Категории"
 TOTAL_EXP_WORKSHEET = "Общий расход"
 
 FAMILY_MEMBERS = ["Катя", "Артем", "Маша", "Алиса"]
 SHARED_LABEL = "Неопр... (на всех)"
 FORM_USERS = FAMILY_MEMBERS + [SHARED_LABEL]
-
-st.set_page_config(page_title="Семейный бюджет", page_icon="👨‍👩‍👧‍👦", layout="wide")
-# --- ЗАЩИТА ПАРОЛЕМ ---
-if "authenticated" not in st.session_state:
-    st.session_state["authenticated"] = False
-
-if not st.session_state["authenticated"]:
-    st.title("🔒 Вход в семейный бюджет")
-    pwd = st.text_input("Введите пароль доступа:", type="password")
-    if st.button("Войти", type="primary"):
-        if pwd == st.secrets.get("APP_PASSWORD", ""):
-            st.session_state["authenticated"] = True
-            st.rerun()
-        else:
-            st.error("Неверный пароль!")
-    st.stop()  # Останавливает загрузку всего остального кода до ввода пароля
 
 
 def get_item(seq, idx, default=""):
@@ -65,41 +66,39 @@ def clean_currency(val):
         return 0.0
 
 
-@st.cache_data(ttl=300)
-def load_categories_dict():
+@st.cache_data(ttl=600)
+def fetch_all_sheets():
     try:
-        resp = requests.get(f"{SCRIPT_URL}?sheet={DICT_WORKSHEET}", timeout=15)
-        rows = resp.json()
-        cat_map = {}
-        for row in rows[1:]:
-            raw_name = str(get_item(row, 0, "")).strip()
-            if raw_name:
-                raw_desc = str(get_item(row, 1, "")).strip()
-                raw_type = str(get_item(row, 2, "Персональная")).strip()
-                cat_map[raw_name] = {"desc": raw_desc, "type": raw_type}
-        sorted_keys = sorted(cat_map.keys(), key=lambda k: k.lower())
-        return {k: cat_map[k] for k in sorted_keys}
+        resp = requests.get(SCRIPT_URL, timeout=15)
+        data = resp.json()
+        if isinstance(data, dict):
+            return data
+        return {"bd": [], "cats": [], "total": []}
     except Exception as e:
-        st.error(f"Ошибка загрузки категорий: {e}")
-        return {"Прочее": {"desc": "", "type": "Персональная"}}
+        st.error(f"Ошибка связи с Google Таблицей: {e}")
+        return {"bd": [], "cats": [], "total": []}
 # --- КОНЕЦ БЛОКА 1 ---
-@st.cache_data(ttl=60)
-def load_data():
-    try:
-        resp = requests.get(f"{SCRIPT_URL}?sheet={DATA_WORKSHEET}", timeout=15)
-        raw_values = resp.json()
-    except Exception as e:
-        st.error(f"Ошибка загрузки БД: {e}")
-        return pd.DataFrame()
+def parse_categories(raw_rows):
+    cat_map = {}
+    for row in raw_rows[1:]:
+        raw_name = str(get_item(row, 0, "")).strip()
+        if raw_name:
+            raw_desc = str(get_item(row, 1, "")).strip()
+            raw_type = str(get_item(row, 2, "Персональная")).strip()
+            cat_map[raw_name] = {"desc": raw_desc, "type": raw_type}
+    if not cat_map:
+        return {"Прочее": {"desc": "", "type": "Персональная"}}
+    sorted_keys = sorted(cat_map.keys(), key=lambda k: k.lower())
+    return {k: cat_map[k] for k in sorted_keys}
 
+
+def parse_bd(raw_values):
     if not raw_values or len(raw_values) < 2:
         return pd.DataFrame()
-
     trimmed_rows = []
     for sheet_row_idx, r in enumerate(raw_values[1:], start=2):
         row_5 = [get_item(r, i, "") for i in range(5)] + [sheet_row_idx]
         trimmed_rows.append(row_5)
-
     df = pd.DataFrame(
         trimmed_rows,
         columns=[
@@ -114,7 +113,6 @@ def load_data():
     df = df[df["Дата"].str.strip() != ""]
     df["Дата"] = pd.to_datetime(df["Дата"], format="%d.%m.%Y", errors="coerce")
     df = df.dropna(subset=["Дата"])
-
     df["Сумма"] = df["Сумма"].apply(clean_currency)
     df["Категория"] = df["Категория"].str.strip()
     df["Имя"] = df["Имя"].str.strip()
@@ -122,26 +120,15 @@ def load_data():
     return df
 
 
-@st.cache_data(ttl=60)
-def load_total_expenses():
-    try:
-        resp = requests.get(
-            f"{SCRIPT_URL}?sheet={TOTAL_EXP_WORKSHEET}", timeout=15
-        )
-        raw_values = resp.json()
-    except Exception:
-        return pd.DataFrame()
-
+def parse_total(raw_values):
     if not raw_values or len(raw_values) < 2:
         return pd.DataFrame()
-
     rows = []
     for sheet_row_idx, r in enumerate(raw_values[1:], start=2):
         d_str = str(get_item(r, 0, "")).strip()
         s_val = clean_currency(get_item(r, 1, 0))
         if d_str:
             rows.append([d_str, s_val, sheet_row_idx])
-
     df_tot = pd.DataFrame(rows, columns=["Дата_стр", "Сумма", "row_idx"])
     df_tot["Дата"] = pd.to_datetime(
         df_tot["Дата_стр"], format="%d.%m.%Y", errors="coerce"
@@ -152,7 +139,7 @@ def load_total_expenses():
     return df_tot
 
 
-# --- ШАПКА ИНТЕРФЕЙСА ---
+# --- ШАПКА И ЕДИНАЯ ЗАГРУЗКА ---
 col_title, col_refresh = st.columns((4, 1))
 with col_title:
     st.title("👨‍👩‍👧‍👦 Семейный бюджет")
@@ -162,23 +149,23 @@ with col_refresh:
         st.cache_data.clear()
         st.rerun()
 
-categories_dict = load_categories_dict()
+all_data = fetch_all_sheets()
+categories_dict = parse_categories(all_data.get("cats", []))
 all_categories = list(categories_dict.keys())
 
 tab_add, tab_total, tab_report = st.tabs(
     ["➕ Добавить расход", "💳 Общий расход", "📊 Авто-свод и поиск"]
 )
 # --- КОНЕЦ БЛОКА 2 ---
-# === ВКЛАДКА 1: ВНЕСЕНИЕ ДАННЫХ ===
-with tab_add:
+@st.fragment
+def render_add_tab():
     if "who_widget" not in st.session_state:
         st.session_state["who_widget"] = []
     if "last_cat_display" not in st.session_state:
         st.session_state["last_cat_display"] = None
 
     def format_cat_option(cat_name):
-        lat_hint = to_lat_layout(cat_name.lower())
-        return f"{cat_name}  ({lat_hint})"
+        return f"{cat_name}  ({to_lat_layout(cat_name.lower())})"
 
     c1, c2 = st.columns(2)
     with c1:
@@ -189,23 +176,21 @@ with tab_add:
             format_func=format_cat_option,
             placeholder="Выберите категорию...",
         )
-
         if selected_cat != st.session_state["last_cat_display"]:
             st.session_state["last_cat_display"] = selected_cat
             if selected_cat and selected_cat in categories_dict:
                 cat_type = categories_dict[selected_cat]["type"].lower()
-                if cat_type == "общая":
-                    st.session_state["who_widget"] = [SHARED_LABEL]
-                else:
-                    st.session_state["who_widget"] = []
+                st.session_state["who_widget"] = (
+                    [SHARED_LABEL] if cat_type == "общая" else []
+                )
 
         if selected_cat and selected_cat in categories_dict:
             info_desc = categories_dict[selected_cat]["desc"]
             info_type = categories_dict[selected_cat]["type"]
-            hint_text = f"Тип: **{info_type}**" + (
-                f" — {info_desc}" if info_desc else ""
+            st.info(
+                f"💡 Тип: **{info_type}**"
+                + (f" — {info_desc}" if info_desc else "")
             )
-            st.info(f"💡 {hint_text}")
 
         who_selected = st.multiselect(
             "На кого записать",
@@ -243,25 +228,27 @@ with tab_add:
 
             rows_to_insert = []
             for idx, person in enumerate(target_people):
-                person_amount = (
+                p_amt = (
                     round(total_amount - split_amount * (count - 1), 2)
                     if idx == count - 1
                     else split_amount
                 )
-                final_note = note_val
-                if count > 1:
-                    tag = (
-                        "[Общее 1/4]"
-                        if count == 4
-                        else f"[1/{count} от {abs(total_amount):g} ₽]"
-                    )
-                    final_note = f"{note_val} {tag}".strip() if note_val else tag
+                tag = (
+                    "[Общее 1/4]"
+                    if count == 4
+                    else f"[1/{count} от {abs(total_amount):g} ₽]"
+                )
+                f_note = (
+                    (f"{note_val} {tag}".strip() if note_val else tag)
+                    if count > 1
+                    else note_val
+                )
                 rows_to_insert.append([
                     date_val.strftime("%d.%m.%Y"),
                     selected_cat,
                     person,
-                    person_amount,
-                    final_note,
+                    p_amt,
+                    f_note,
                 ])
 
             try:
@@ -280,11 +267,15 @@ with tab_add:
                     st.error(f"Ошибка записи: {resp.text}")
             except Exception as e:
                 st.error(f"Не удалось отправить данные: {e}")
+
+
+with tab_add:
+    render_add_tab()
 # --- КОНЕЦ БЛОКА 3 ---
-# === ВКЛАДКА 2: ОБЩИЙ РАСХОД (ДЛЯ РАСЧЕТА КАТЕГОРИИ ПРОДУКТЫ) ===
+# === ВКЛАДКА 2: ОБЩИЙ РАСХОД ===
 with tab_total:
     st.subheader("💳 Учет общих трат за месяц (база для расчета «Продуктов»)")
-    df_tot = load_total_expenses()
+    df_tot = parse_total(all_data.get("total", []))
 
     today_dt = datetime.today()
     cur_year, cur_month = today_dt.year, today_dt.month
@@ -339,9 +330,6 @@ with tab_total:
                 resp = requests.post(SCRIPT_URL, json=payload, timeout=15)
                 if resp.status_code == 200:
                     st.cache_data.clear()
-                    st.success(
-                        f"✅ Лист «{TOTAL_EXP_WORKSHEET}» обновлен! Дата: **{today_str}**, Сумма: **{new_total_sum:,.2f} ₽**"
-                    )
                     st.rerun()
                 else:
                     st.error(f"Ошибка сервера: {resp.text}")
@@ -362,8 +350,8 @@ with tab_total:
 # --- КОНЕЦ БЛОКА 4 ---
 # === ВКЛАДКА 3: АВТО-СВОД, ПОИСК, РЕДАКТИРОВАНИЕ И УДАЛЕНИЕ ===
 with tab_report:
-    df = load_data()
-    df_tot = load_total_expenses()
+    df = parse_bd(all_data.get("bd", []))
+    df_tot = parse_total(all_data.get("total", []))
 
     if df.empty and df_tot.empty:
         st.warning("Пока нет данных для формирования свода.")
